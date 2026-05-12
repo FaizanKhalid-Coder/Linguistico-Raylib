@@ -1,0 +1,1352 @@
+// ============================================================
+//  LINGUISTICO  -  Raylib Graphic Version
+//  Developed by Irtiza, Faizan, Arshad & Gohar
+//
+//  COMPILE:
+//    g++ src/main.cpp -o Linguistico
+//        -Ilib/raylib/include -Llib/raylib/lib
+//        -lraylib -lopengl32 -lgdi32 -lwinmm
+//
+//  PROFICIENCY LABELS:
+//    Reading     →  Easy   (Alphabets / Basics)
+//    Writing     →  Medium (Words / Sentences)
+//    Translation →  Hard   (Sentences / Advanced Translation)
+// ============================================================
+
+// ── IMPORTANT: Raylib MUST come first ────────
+#include "raylib.h"
+
+#define NOGDI
+#define NOUSER
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef NOGDI
+#undef NOUSER
+
+#ifndef SW_HIDE
+#define SW_HIDE 0
+#endif
+
+#include <cmath>
+#include <algorithm>
+#include <string>
+#include <vector>
+#include <cstdio>
+#include <cstdlib>
+
+// ─────────────────────────────────────────────
+//  COLOURS
+// ─────────────────────────────────────────────
+#define C_BG      (Color){15,  12,  30,  255}
+#define C_PANEL   (Color){28,  22,  55,  255}
+#define C_ACCENT  (Color){180, 130, 255, 255}
+#define C_GOLD    (Color){230, 190,  80, 255}
+#define C_WHITE   (Color){235, 230, 255, 255}
+#define C_MUTED   (Color){120, 110, 160, 255}
+#define C_CORRECT (Color){ 80, 220, 130, 255}
+#define C_WRONG   (Color){230,  80,  90, 255}
+#define C_HOVER   (Color){210, 170, 255, 255}
+#define C_READ    (Color){ 80, 180, 255, 255}   // Reading  = blue
+#define C_WRITE   (Color){255, 165,  50, 255}   // Writing  = amber
+#define C_TRANS   (Color){220,  80, 180, 255}   // Translation = pink
+
+// ─────────────────────────────────────────────
+//  TEXT-TO-SPEECH  (PowerShell, no sapi.h needed)
+// ─────────────────────────────────────────────
+static HANDLE g_proc = NULL;
+
+static void SpeakStop()
+{
+    if (g_proc) {
+        TerminateProcess(g_proc, 0);
+        CloseHandle(g_proc);
+        g_proc = NULL;
+    }
+}
+
+static void Speak(const std::string& text)
+{
+    SpeakStop();
+    std::string s;
+    for (char c : text)
+        s += (c == '\'') ? std::string("''") : std::string(1, c);
+
+    std::string cmd =
+        "powershell -WindowStyle Hidden -Command \""
+        "Add-Type -AssemblyName System.Speech;"
+        "$v=New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+        "$v.Rate=-1;$v.Speak('" + s + "')\"";
+
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    char buf[8192];
+    snprintf(buf, sizeof(buf), "%s", cmd.c_str());
+
+    if (CreateProcessA(NULL, buf, NULL, NULL, FALSE,
+                       CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        g_proc = pi.hProcess;
+    }
+}
+
+// ─────────────────────────────────────────────
+//  UI SOUNDS
+// ─────────────────────────────────────────────
+static Sound MakeTone(float freq, float dur, float vol)
+{
+    int n = (int)(44100 * dur);
+    float* d = (float*)MemAlloc(n * sizeof(float));
+    for (int i = 0; i < n; i++) {
+        float t = (float)i / 44100;
+        d[i] = sinf(2.f * PI * freq * t) * vol * (1.f - t / dur);
+    }
+    Wave w = { (unsigned int)n, 44100, 32, 1, d };
+    Sound s = LoadSoundFromWave(w);
+    MemFree(d);
+    return s;
+}
+
+// ─────────────────────────────────────────────
+//  FONT  –  loaded with full Unicode codepoints
+//  so that Þ þ Æ æ Ƿ ƿ ð ó á é ¿ ¡ ñ ü etc.
+//  all render correctly.
+// ─────────────────────────────────────────────
+static Font g_font = { 0 };
+
+static void InitCustomFont()
+{
+    // ── Codepoint list ─────────────────────────────────────────────────────
+    // We build an explicit list so Raylib's font atlas contains EVERY glyph
+    // used in the project — including Old English symbols Þ þ Æ æ Ƿ ƿ ð Ð
+    // and punctuation like – — • → ─ ═ that are above U+024F.
+    //
+    // HOW RAYLIB FONT LOADING WORKS:
+    //   LoadFont()   → only bakes ASCII 32-126   (no Unicode)
+    //   LoadFontEx() → bakes whatever codepoints YOU pass in
+    // So we MUST use LoadFontEx with a complete list.
+    // ─────────────────────────────────────────────────────────────────────
+
+    std::vector<int> cps;
+    cps.reserve(600);
+
+    // 1. Basic ASCII printable (32-126)
+    for (int i = 32; i <= 126; i++) cps.push_back(i);
+
+    // 2. Latin-1 Supplement + Latin Extended-A/B  (covers Þþ Ææ ðÐ óáéíúñü ¿¡ etc.)
+    for (int i = 0x00A0; i <= 0x024F; i++) cps.push_back(i);
+
+    // 3. Wynn explicitly  (U+01F7 Ƿ  U+01BF ƿ — inside range above but belt+braces)
+    cps.push_back(0x01F7);  // Ƿ  capital Wynn
+    cps.push_back(0x01BF);  // ƿ  small   Wynn
+
+    // 4. General Punctuation block: en-dash, em-dash, bullet, arrows (U+2013..U+2192)
+    for (int i = 0x2013; i <= 0x2192; i++) cps.push_back(i);
+
+    // 5. Box-drawing characters used in decorative lines (U+2500..U+257F)
+    for (int i = 0x2500; i <= 0x257F; i++) cps.push_back(i);
+
+    // 6. Smart quotes (sometimes in pasted text)
+    int extras[] = { 0x2018, 0x2019, 0x201C, 0x201D };
+    for (int cp : extras) cps.push_back(cp);
+
+    // Remove duplicates (simple sort+unique)
+    std::sort(cps.begin(), cps.end());
+    cps.erase(std::unique(cps.begin(), cps.end()), cps.end());
+
+    int glyphCount = (int)cps.size();
+
+    // ── Font search order ──────────────────────────────────────────────────
+    // LiberationSans-Regular.ttf ships with this project (fonts/ subfolder)
+    // and is the ONLY font guaranteed to contain ALL of the above including
+    // Ƿ/ƿ (U+01F7/U+01BF).  Windows fonts like Arial lack Wynn entirely.
+    //
+    // Place LiberationSans-Regular.ttf next to the .exe  OR  in fonts/
+    // (both paths are tried below).  Windows system fonts are tried after
+    // that as a quality fallback for the glyphs they DO cover.
+    // ─────────────────────────────────────────────────────────────────────
+    const char* fontPaths[] = {
+        "LiberationSans-Regular.ttf",           // same folder as .exe
+        "fonts/LiberationSans-Regular.ttf",     // fonts/ sub-folder
+        "C:/Windows/Fonts/arial.ttf",           // Windows fallback (missing Ƿ/ƿ)
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
+        "C:/Windows/Fonts/tahoma.ttf",
+        "C:/Windows/Fonts/consola.ttf",
+        nullptr
+    };
+
+    g_font.texture.id = 0;
+    for (int k = 0; fontPaths[k] != nullptr; k++) {
+        g_font = LoadFontEx(fontPaths[k], 52, cps.data(), glyphCount);
+        if (g_font.texture.id > 0) break;
+    }
+
+    // Absolute fallback (no Unicode, but at least the app won't crash)
+    if (g_font.texture.id == 0)
+        g_font = GetFontDefault();
+
+    // Bilinear filter keeps glyphs sharp at varying display sizes
+    SetTextureFilter(g_font.texture, TEXTURE_FILTER_BILINEAR);
+}
+
+static void DrawTextClean(const char* text, int x, int y, int fontSize, Color color)
+{
+    // Always DrawTextEx — the built-in DrawText has no Unicode glyphs.
+    // Thorn (Þ/þ), Ash (Æ/æ), Wynn (Ƿ/ƿ) etc. need the custom font atlas.
+    DrawTextEx(g_font, text, (Vector2){(float)x, (float)y},
+               (float)fontSize, 1.0f, color);
+}
+
+static void DrawTextCentered(const char* text, int y, int fontSize, Color color, int screenWidth)
+{
+    int tw = (int)MeasureTextEx(g_font, text, (float)fontSize, 1.0f).x;
+    DrawTextClean(text, (screenWidth - tw) / 2, y, fontSize, color);
+}
+
+#define CText(t, y, fs, c, sw) DrawTextCentered(t, y, fs, c, sw)
+
+// ─────────────────────────────────────────────
+//  UI HELPERS
+// ─────────────────────────────────────────────
+static Rectangle RaylibBtn(int cx, int y, int w, int h) {
+    return { (float)(cx - w/2), (float)y, (float)w, (float)h };
+}
+static bool Hov(Rectangle r) {
+    return CheckCollisionPointRec(GetMousePosition(), r);
+}
+static bool Clk(Rectangle r) {
+    return Hov(r) && IsMouseButtonPressed(MOUSE_LEFT_BUTTON);
+}
+static void DrawBtn(Rectangle r, const char* lbl, bool hov, bool sel, Color sc) {
+    Color bg = sel ? sc : (hov ? C_HOVER : C_PANEL);
+    Color tc = sel ? C_BG : (hov ? C_BG : C_WHITE);
+    DrawRectangleRounded(r, 0.3f, 8, bg);
+    DrawRectangleRoundedLines(r, 0.3f, 8, hov ? C_HOVER : C_ACCENT);
+    int tw = (int)MeasureTextEx(g_font, lbl, 17, 1.0f).x;
+    DrawTextClean(lbl, (int)(r.x + r.width/2 - tw/2),
+                  (int)(r.y + r.height/2 - 9), 17, tc);
+}
+static bool DrawSpeaker(int x, int y, bool playing) {
+    Rectangle r = { (float)x, (float)y, 46.f, 36.f };
+    bool hov = Hov(r);
+    Color bg = playing ? C_ACCENT : (hov ? (Color){60,50,100,255} : (Color){35,28,60,210});
+    DrawRectangleRounded(r, 0.35f, 8, bg);
+    DrawRectangleRoundedLines(r, 0.35f, 8, playing ? C_WHITE : (hov ? C_ACCENT : C_MUTED));
+    Color ic = playing ? C_BG : C_WHITE;
+    int cx = x+13, cy = y+18;
+    DrawRectangle(cx-5, cy-5, 7, 10, ic);
+    DrawTriangle({(float)(cx+2),(float)(cy-5)},
+                 {(float)(cx+2),(float)(cy+5)},
+                 {(float)(cx+11),(float)(cy-9)}, ic);
+    DrawTriangle({(float)(cx+2),(float)(cy+5)},
+                 {(float)(cx+11),(float)(cy+9)},
+                 {(float)(cx+11),(float)(cy-9)}, ic);
+    DrawTextClean(playing ? "))))" : "))", x+29, y+11, 11,
+             playing ? C_BG : (hov ? C_ACCENT : C_MUTED));
+    DrawTextClean("listen", x+3, y+40, 10, C_MUTED);
+    return Clk(r);
+}
+
+// ─────────────────────────────────────────────
+//  DATA STRUCTURES
+// ─────────────────────────────────────────────
+struct Question {
+    std::string prompt;
+    std::string subtext;
+    std::string speakText;
+    std::vector<std::string> options;
+    std::vector<int> correct;
+    std::string explanation;
+    // For type-answer questions: if typeAnswer is true, options is unused
+    bool typeAnswer = false;
+    std::vector<std::string> acceptedAnswers; // valid typed answers
+};
+
+struct Level       { std::string title, subtitle; std::vector<Question> questions; };
+struct Proficiency { std::string name; std::string displayName; std::string badge; std::vector<Level> levels; };
+struct Course      { std::string name;             std::vector<Proficiency> profs; };
+
+// Helper to get colour for proficiency index
+static Color ProfColor(int i) {
+    if (i == 0) return C_READ;
+    if (i == 1) return C_WRITE;
+    return C_TRANS;
+}
+
+// ─────────────────────────────────────────────
+//  ALL QUESTIONS
+// ─────────────────────────────────────────────
+static std::vector<Course> BuildCourses()
+{
+    std::vector<Course> C;
+
+    // ════════════════════════════════════════
+    //  OLD ENGLISH
+    // ════════════════════════════════════════
+    Course oe; oe.name = "Old English";
+
+    // ── Proficiency 1 : READING (Easy – Alphabets) ──────────
+    Proficiency oe_p1;
+    oe_p1.name        = "Reading";
+    oe_p1.displayName = "Reading";
+    oe_p1.badge       = "Alphabets";
+
+    // LEVEL 1 – Thorn  Þ/þ
+    oe_p1.levels.push_back({ "Level 1", "Thorn  \xC3\x9E/\xC3\xBE", {
+        { "Identify the sound made by the given letter:",
+          "\xC3\x9E/\xC3\xBE  (Thorn)",
+          "Th. Thorn. The th sound, as in think, this, that, thou.",
+          {"T","Th","Ma","Sla"}, {1},
+          "Thorn represents the 'th' sound.\nIt fell out of use in Modern English." },
+
+        { "Identify the correct use of Thorn:", "",
+          "Who do you think you are pal?",
+          {"Who do you think you are pal?",
+           "Who do you think you are \xC3\xBEal?",
+           "Who do you \xC3\xBEink you are pal?"}, {2},
+          "Option 3: '\xC3\xBE' at the start of 'think' = Thorn." },
+
+        { "Identify the correct use of Thorn:", "",
+          "Thou shall not take thine birthright.",
+          {"\xC3\x9Eou shall not take \xC3\xBEine's birthright",
+           "How do \xC3\xBEhey no\xC3\xBE see \xC3\xBEhe truth?",
+           "Where do you feel \xC3\xBEain?",
+           "\xC3\x9Eeople in \xC3\xBEain \xC3\xBErefer sleeping?"}, {0},
+          "Option 1: '\xC3\x9Eou'=You, '\xC3\xBEine'=your." },
+
+        { "Identify the correct use of Thorn:", "",
+          "Who do you think you are?",
+          {"Who do you think you are pal?",
+           "Who do you think you are \xC3\xBEal?",
+           "Who do you \xC3\xBEink you are?"}, {2},
+          "Option 3 uses '\xC3\xBE' correctly at the start of 'think'." },
+    }});
+
+    // LEVEL 2 – Wynn  Ƿ/ƿ
+    oe_p1.levels.push_back({ "Level 2", "Wynn  \xC6\xB7/\xC6\xBF", {
+        { "Identify the sound made by the given letter:",
+          "\xC6\xB7/\xC6\xBF  (Wynn)",
+          "W. Wynn. The W sound, as in we, will, water, win.",
+          {"W","in","e","Ee"}, {0},
+          "Wynn represents the 'w' sound.\nIt fell out of use in Modern English." },
+
+        { "Identify the correct use of Wynn:", "",
+          "We lofe to eat food.",
+          {"\xC6\xB7 lofe to eat food",
+           "\xC6\xB7e love to eat food.",
+           "\xC6\xB7e lofe to eat food."}, {1,2},
+          "Options 2 & 3 correct. 'f' used to represent the 'v' sound." },
+
+        { "Which sentences use Wynn and Thorn correctly?", "",
+          "We do not need thy aid. We will help you win this war.",
+          {"\xC6\xB7e do not need \xC3\xBEy aid",
+           "When is the war starting?",
+           "\xC6\xB7e \xC6\xBFill help you \xC6\xBFin this \xC6\xBFar.",
+           "Isn't this more preferable to sleeping?"}, {0,2},
+          "Options 1 & 3 use Thorn and Wynn correctly." },
+    }});
+
+    // LEVEL 3 – Ash  Æ/æ
+    oe_p1.levels.push_back({ "Level 3", "Ash  \xC3\x86/\xC3\xA6", {
+        { "Identify the sound made by the given letter:",
+          "\xC3\x86/\xC3\xA6  (Ash)",
+          "Ae. Ash. The short A sound, as in cat, bat, man.",
+          {"ae","sh","xz","a"}, {3},
+          "Ash represents the short 'a' sound, as in 'cat'." },
+
+        { "Which sound does Ash (ae) make?", "",
+          "Ash. Short a, as in cat.",
+          {"ay (as in day)","a (as in cat)","ee (as in see)","a (as in father)"}, {1},
+          "Ash = short 'a' like in 'cat'." },
+
+        { "Identify the correct use of Ash:", "",
+          "Alfred. In Old English: Aelfred.",
+          {"\xC3\x86lfred","\xC3\x86liens","D\xC3\xA6d Aliens"}, {0},
+          "'\xC3\x86lfred' uses Ash for the 'a' sound in Alfred." },
+
+        { "Identify the correct Old English sentence using Ash:", "",
+          "This is a cat. In Old English: This is a caet.",
+          {"\xC3\x9Eis is a c\xC3\xA6t",
+           "\xC3\x9Eis is a ceet",
+           "\xC3\x9Eis is a cat",
+           "\xC3\x9Eis is a caet"}, {0},
+          "'c\xC3\xA6t' uses Ash for the 'a' sound in 'cat'." },
+    }});
+
+    oe.profs.push_back(oe_p1);
+
+    // ── Proficiency 2 : WRITING (Medium – Words) ──────────
+    Proficiency oe_p2;
+    oe_p2.name        = "Writing";
+    oe_p2.displayName = "Writing";
+    oe_p2.badge       = "Words";
+
+    oe_p2.levels.push_back({ "Level 1", "Old English Words", {
+        { "What does '\xC6\xB7e' (Wynn+e) mean?", "",
+          "We. Means We in Old English.",
+          {"He","We","They","You"}, {1},
+          "'\xC6\xB7e' = We in Old English." },
+
+        { "What does '\xC3\x9Eu' mean?", "",
+          "Thu. Thorn u. Means Thou or You.",
+          {"He","She","Thou / You","They"}, {2},
+          "'\xC3\x9Eu' = Thou (You) in Old English." },
+
+        { "What does 's\xC6\xBFeord' mean?", "",
+          "sweord. An Old English word for sword.",
+          {"Shield","Spear","Sword","Warrior"}, {2},
+          "'s\xC6\xBFeord' means Sword." },
+
+        { "What does 'H\xC6\xBF\xC3\xA6t' mean?", "",
+          "Hwaet! An Old English exclamation meaning Listen.",
+          {"Listen!","Sleep","Warrior","Kingdom"}, {0},
+          "'H\xC6\xBF\xC3\xA6t!' = Listen! or Lo!" },
+    }});
+
+    oe_p2.levels.push_back({ "Level 2", "More Old English Words", {
+        { "What does '\xC6\xBFeoruld' mean?", "",
+          "weoruld. An Old English word for world.",
+          {"Earth","World","Sky","Sea"}, {1},
+          "'\xC6\xBFeoruld' means World." },
+
+        { "What does 'cyning' mean?", "",
+          "cyning. An Old English word for king.",
+          {"Knight","Prince","King","Castle"}, {2},
+          "'cyning' means King." },
+
+        // Type-answer question
+        { "Type the Old English word for 'King': ", "",
+          "Type the Old English word for King.",
+          {}, {},
+          "The correct Old English word is 'cyning'.",
+          true,
+          {"cyning","Cyning","CYNING"} },
+
+        // Type-answer question
+        { "Type the Modern translation for Old English '\xC3\xA9or\xC3\xBEe' (earth): ", "",
+          "Type the Modern translation for eorthe.",
+          {}, {},
+          "'eor\xC3\xBEe' was the Old English word for 'Earth'.",
+          true,
+          {"earth","Earth","EARTH","eorth","Eorth"} },
+    }});
+
+    oe_p2.levels.push_back({ "Level 3", "Old English Sentences", {
+        { "Identify the correct Old English sentence:", "",
+          "Hwaet! The cyning has a sweord.",
+          {"H\xC6\xBF\xC3\xA6t! \xC3\x9Ee cyning has a s\xC6\xBFeord.",
+           "What! The king has a sword.",
+           "H\xC6\xBF\xC3\xA6t! The king has a sword.",
+           "What! \xC3\x9Ee cyning has a s\xC6\xBFeord."}, {0},
+          "Option 1 uses Old English spelling consistently." },
+
+        { "Which sentence uses previous OE words correctly?", "",
+          "The cyning rules the weoruld.",
+          {"\xC3\x9Ee cyning rules \xC3\xBEe \xC6\xBFeoruld.",
+           "\xC3\x9Ee king rules \xC3\xBEe world.",
+           "\xC3\x9Ee cyning rules \xC3\xBEe world.",
+           "\xC3\x9Ee king rules \xC3\xBEe \xC6\xBFeoruld."}, {0},
+          "Option 1 properly uses Thorn, Wynn and OE vocabulary." },
+
+        { "Translate: '\xC6\xB7e \xC6\xBFillan help \xC3\xBEe cyning.'", "",
+          "We willan help the cyning.",
+          {"We will help the king.",
+           "They will attack the king.",
+           "We want the sword.",
+           "Thou will help the king."}, {0},
+          "'willan'=will/want, 'cyning'=king." },
+    }});
+
+    oe.profs.push_back(oe_p2);
+
+    // ── Proficiency 3 : TRANSLATION (Hard – Sentences) ──────
+    Proficiency oe_p3;
+    oe_p3.name        = "Translation";
+    oe_p3.displayName = "Translation";
+    oe_p3.badge       = "Sentences";
+
+    oe_p3.levels.push_back({ "Level 1", "Sentence Translation", {
+        { "Translate the sentence:",
+          "\xC3\x9Ee cyning carries a s\xC6\xBFeord.",
+          "The cyning carries a sweord.",
+          {"The king carries a sword.",
+           "The knight carries a shield.",
+           "The warrior carries a spear.",
+           "The prince carries a sword."}, {0},
+          "'cyning'=king, 's\xC6\xBFeord'=sword." },
+
+        { "Translate the sentence:",
+          "\xC6\xB7e \xC6\xBFillan help \xC3\xBEe cyning.",
+          "We willan help the cyning.",
+          {"We will help the king.",
+           "They will attack the king.",
+           "We want the sword.",
+           "Thou will help the king."}, {0},
+          "'\xC6\xB7e'=We, '\xC6\xBFillan'=will, 'cyning'=king." },
+
+        { "Which sentence is most properly Old English?", "",
+          "The cyning rules the weoruld.",
+          {"\xC3\x9Ee cyning rules \xC3\xBEe \xC6\xBFeoruld.",
+           "\xC3\x9Ee cyning rules the world.",
+           "The king rules \xC3\xBEe \xC6\xBFeoruld.",
+           "The king rules the world."}, {0},
+          "Option 1 uses proper Old English spelling throughout." },
+    }});
+
+    oe_p3.levels.push_back({ "Level 2", "Beowulf", {
+        { "Translate the sentence:",
+          "H\xC6\xBF\xC3\xA6t! W\xC3\xA9 G\xC3\xA1rdena in g\xC3\xA9ardagum.",
+          "Hwaet! We Gardena in geardagum.",
+          {"Lo! We Spear-Danes in days of old.",
+           "Why! Our Gardens in days of year.",
+           "Lo! We gardens in the year of days."}, {0},
+          "Opening of Beowulf. 'H\xC6\xBF\xC3\xA6t!'=Listen/Lo!" },
+
+        { "Translate the sentence:",
+          "\xC3\x9Eetta er g\xC3\xB3\xC3\xB0ur dagur.",
+          "Thetta er godur dagur.",
+          {"This is a good day.",
+           "Data or good dogs.",
+           "This is a good dog."}, {0},
+          "'g\xC3\xB3\xC3\xB0ur'=good, 'dagur'=day." },
+    }});
+
+    oe_p3.levels.push_back({ "Level 3", "Advanced Translation", {
+        { "Translate the sentence:",
+          "H\xC6\xBF\xC3\xA6t! \xC6\xB7e are ready for battle.",
+          "Hwaet! We are ready for battle.",
+          {"Listen! We are ready for battle.",
+           "We are sleeping peacefully.",
+           "The king is afraid.",
+           "The world is ending."}, {0},
+          "'H\xC6\xBF\xC3\xA6t!'=Listen! or Lo!" },
+
+        { "Identify the properly written Old English sentence:", "",
+          "Thu hast a sweord.",
+          {"\xC3\x9Eu hast a s\xC6\xBFeord.",
+           "You hast a sword.",
+           "\xC3\x9Eu has a sword.",
+           "Thou hast a sword."}, {0},
+          "Option 1 uses proper Old English style with Thorn and Wynn." },
+
+        { "What does 'g\xC3\xB3d cyning' mean?", "",
+          "god cyning. Old English phrase.",
+          {"Bad warrior","Great world","Good king","Strong sword"}, {2},
+          "'g\xC3\xB3d'=good, 'cyning'=king." },
+
+        { "Which sentence is fully Old English styled?", "",
+          "Hwaet! The god cyning has a sweord.",
+          {"H\xC6\xBF\xC3\xA6t! \xC3\x9Ee g\xC3\xB3d cyning has a s\xC6\xBFeord.",
+           "Listen! The good king has a sword.",
+           "H\xC6\xBF\xC3\xA6t! The g\xC3\xB3d king has a s\xC6\xBFeord.",
+           "Listen! \xC3\x9Ee good cyning has a sword."}, {0},
+          "Option 1 is fully consistent in Old English style." },
+    }});
+
+    oe_p3.levels.push_back({ "Level 4", "Reading & Translation", {
+        { "Translate the following sentence:",
+          "H\xC6\xBF\xC3\xA6t! \xC3\x9Ee cyning rides ofer \xC3\xBEe eor\xC3\xB0an mid his s\xC6\xBFeorde.",
+          "Hwaet! The cyning rides ofer the eorthan mid his sweorde.",
+          {"Listen! The king rides over the earth with his sword.",
+           "The warrior sleeps beneath the stars.",
+           "The king throws away his shield.",
+           "Listen! The prince rides across the sea."}, {0},
+          "'ofer'=over, 'eor\xC3\xB0an'=earth, 's\xC6\xBFeorde'=sword." },
+
+        // Type-answer
+        { "Type the Modern English translation:",
+          "\xC3\x9Eu eart min freond.",
+          "Thu eart min freond.",
+          {}, {},
+          "'\xC3\x9Eu eart min freond' = You are my friend.",
+          true,
+          {"You are my friend","you are my friend","Thou are my friend",
+           "thou are my friend","Thou art my friend","thou art my friend"} },
+
+        { "Which paragraph is most consistently Old English?", "",
+          "Hwaet! The cyning has a sweord.",
+          {"H\xC6\xBF\xC3\xA6t! \xC3\x9Ee cyning has a s\xC6\xBFeord and rides \xC3\xBEurh \xC3\xBEe \xC6\xBFeoruld.",
+           "Listen! The king has a sword and rides through the world.",
+           "H\xC6\xBF\xC3\xA6t! The cyning has a sword and rides \xC3\xBEurh the world.",
+           "Listen! \xC3\x9Ee king has a s\xC6\xBFeord and rides through \xC3\xBEe \xC6\xBFeoruld."}, {0},
+          "Option 1 is fully Old English styled throughout." },
+
+        { "Translate: F\xC3\xA6der ure, \xC3\xBEu \xC3\xBEe eart on heofonum,",
+          "F\xC3\xA6der ure, \xC3\xBEu \xC3\xBEe eart on heofonum,",
+          "Faeder ure, thu the eart on heofonum.",
+          {"Our Father, thou who art in heaven,",
+           "Great king above the earth.",
+           "Father of warriors in battle.",
+           "Lord of swords and kings."}, {0},
+          "Opening of the Lord's Prayer in Old English." },
+
+        // Type-answer
+        { "Type the Modern English translation:",
+          "\xC3\x9Ee cyning has a s\xC6\xBFeord",
+          "The cyning has a sweord.",
+          {}, {},
+          "'\xC3\x9Ee cyning has a s\xC6\xBFeord' = The king has a sword.",
+          true,
+          {"The king has a sword","the king has a sword","THE KING HAS A SWORD"} },
+    }});
+
+    oe.profs.push_back(oe_p3);
+    C.push_back(oe);
+
+    // ════════════════════════════════════════
+    //  SPANISH
+    // ════════════════════════════════════════
+    Course sp; sp.name = "Spanish";
+
+    // ── Proficiency 1 : READING (Easy – Basics) ──────────
+    Proficiency sp_p1;
+    sp_p1.name        = "Reading";
+    sp_p1.displayName = "Reading";
+    sp_p1.badge       = "Basics";
+
+    sp_p1.levels.push_back({ "Level 1", "Greetings", {
+        { "What does 'Hola' mean?", "",
+          "Hola",
+          {"Goodbye","Please","Hello","Thanks"}, {2},
+          "'Hola' means Hello." },
+
+        { "What does 'Adi\xC3\xB3s' mean?", "",
+          "Adios",
+          {"Goodbye","Good morning","Friend","Food"}, {0},
+          "'Adi\xC3\xB3s' means Goodbye." },
+
+        { "Which sentence correctly says 'Hello friend'?", "",
+          "Hola amigo",
+          {"Hola amigo","Adi\xC3\xB3s amigo","Gracias amigo","Por favor amigo"}, {0},
+          "'Hola amigo' = Hello friend." },
+    }});
+
+    sp_p1.levels.push_back({ "Level 2", "Numbers", {
+        { "What does 'Uno' mean?", "",
+          "Uno",
+          {"One","Two","Three","Four"}, {0},
+          "'Uno' means One." },
+
+        { "What does 'Cinco' mean?", "",
+          "Cinco",
+          {"Seven","Five","Six","Ten"}, {1},
+          "'Cinco' means Five." },
+
+        { "What does 'Diez' mean?", "",
+          "Diez",
+          {"Five","Eight","Nine","Ten"}, {3},
+          "'Diez' means Ten." },
+    }});
+
+    sp_p1.levels.push_back({ "Level 3", "Colors", {
+        { "What does 'Rojo' mean?", "",
+          "Rojo",
+          {"Blue","Red","Green","Yellow"}, {1},
+          "'Rojo' means Red." },
+
+        { "What does 'Azul' mean?", "",
+          "Azul",
+          {"Black","White","Blue","Pink"}, {2},
+          "'Azul' means Blue." },
+
+        { "What does 'Verde' mean?", "",
+          "Verde",
+          {"Yellow","Black","Green","White"}, {2},
+          "'Verde' means Green." },
+    }});
+
+    sp.profs.push_back(sp_p1);
+
+    // ── Proficiency 2 : WRITING (Medium – Sentences) ─────
+    Proficiency sp_p2;
+    sp_p2.name        = "Writing";
+    sp_p2.displayName = "Writing";
+    sp_p2.badge       = "Sentences";
+
+    sp_p2.levels.push_back({ "Level 1", "Basic Sentences", {
+        { "What does 'Buenos d\xC3\xADas' mean?", "",
+          "Buenos dias",
+          {"Good afternoon","Good night","Good morning","Goodbye"}, {2},
+          "'Buenos d\xC3\xADas' = Good morning." },
+
+        { "What does '\xC2\xBFC\xC3\xB3mo est\xC3\xA1s?' mean?", "",
+          "Como estas?",
+          {"What is your name?","How are you?","Where are you?","Goodbye friend"}, {1},
+          "'\xC2\xBFC\xC3\xB3mo est\xC3\xA1s?' = How are you?" },
+
+        { "What does 'Ella bebe agua' mean?", "",
+          "Ella bebe agua.",
+          {"She drinks water.",
+           "She eats bread.",
+           "She reads books.",
+           "She likes music."}, {0},
+          "'Ella'=She, 'bebe'=drinks, 'agua'=water." },
+    }});
+
+    sp_p2.levels.push_back({ "Level 2", "Animals & Objects", {
+        { "Translate: 'El gato es negro.'", "",
+          "El gato es negro.",
+          {"The cat is black.",
+           "The dog is white.",
+           "The bird is red.",
+           "The fish is blue."}, {0},
+          "'gato'=cat, 'negro'=black." },
+
+        { "What does 'escuela' mean?", "",
+          "escuela",
+          {"Library","School","Hospital","House"}, {1},
+          "'Escuela' means School." },
+
+        // Type-answer
+        { "Type the Spanish word for 'Water': ", "",
+          "Type the Spanish word for Water.",
+          {}, {},
+          "The correct answer was 'agua'.",
+          true,
+          {"agua","Agua","AGUA"} },
+    }});
+
+    sp_p2.levels.push_back({ "Level 3", "My Name & Places", {
+        { "What does 'Me llamo' mean?", "",
+          "Me llamo",
+          {"I am hungry","My name is","I am going","Where is"}, {1},
+          "'Me llamo' = My name is." },
+
+        { "What does 'llamo' mean?", "",
+          "llamo",
+          {"Day","Llama","Name","Tomato"}, {2},
+          "'llamo' means Name (as in 'Me llamo' = My name is)." },
+
+        // Type-answer
+        { "Type the Spanish translation for 'My name is': ", "",
+          "Type the Spanish translation for My name is.",
+          {}, {},
+          "The correct answer was 'Me llamo'.",
+          true,
+          {"Me llamo","me llamo","ME LLAMO"} },
+    }});
+
+    sp.profs.push_back(sp_p2);
+
+    // ── Proficiency 3 : TRANSLATION (Hard – Reading & Translation) ──
+    Proficiency sp_p3;
+    sp_p3.name        = "Translation";
+    sp_p3.displayName = "Translation";
+    sp_p3.badge       = "Reading & Translation";
+
+    sp_p3.levels.push_back({ "Level 1", "Reading Basics", {
+        { "Translate: 'Mi amigo tiene un perro.'", "",
+          "Mi amigo tiene un perro.",
+          {"My friend has a dog.",
+           "My brother has a cat.",
+           "My teacher has a horse.",
+           "My friend lost a dog."}, {0},
+          "'Mi amigo'=My friend, 'tiene'=has, 'perro'=dog." },
+
+        { "What does 'escuela' mean?", "",
+          "escuela",
+          {"Library","School","Hospital","House"}, {1},
+          "'Escuela' means School." },
+
+        { "What does 'llamo' mean?", "",
+          "llamo",
+          {"Day","Llama","Name","Tomato"}, {2},
+          "'llamo' means Name." },
+
+        // Type-answer
+        { "Type the Spanish translation for 'My name is': ", "",
+          "Type the Spanish translation for My name is.",
+          {}, {},
+          "The correct answer was 'Me llamo'.",
+          true,
+          {"Me llamo","me llamo","ME LLAMO"} },
+    }});
+
+    sp_p3.levels.push_back({ "Level 2", "Sentence Translation", {
+        { "Translate: 'Nosotros vamos a la escuela.'", "",
+          "Nosotros vamos a la escuela.",
+          {"We are going to school.",
+           "They are leaving school.",
+           "We are building a school.",
+           "They are entering the house."}, {0},
+          "'Nosotros'=We, 'vamos'=going, 'escuela'=school." },
+
+        { "Translate: 'El ni\xC3\xB1o come pan.'", "",
+          "El nino come pan.",
+          {"The child drinks milk.",
+           "The boy eats bread.",
+           "The teacher reads books.",
+           "The dog eats meat."}, {1},
+          "'ni\xC3\xB1o'=boy, 'come'=eats, 'pan'=bread." },
+
+        // Type-answer
+        { "Type the English translation for 'Buenas noches': ", "",
+          "Type the English translation for Buenas noches.",
+          {}, {},
+          "'Buenas noches' means Good night.",
+          true,
+          {"Good night","good night","GOOD NIGHT"} },
+    }});
+
+    sp_p3.levels.push_back({ "Level 3", "Advanced Translation", {
+        { "Translate: 'La comida est\xC3\xA1 en la mesa.'", "",
+          "La comida esta en la mesa.",
+          {"The food is on the table.",
+           "The water is on the floor.",
+           "The dog is in the house.",
+           "The books are on the chair."}, {0},
+          "'comida'=food, 'mesa'=table." },
+
+        { "Which sentence means '\xC2\xBFD\xC3\xB3nde est\xC3\xA1 la escuela?'", "",
+          "Donde esta la escuela?",
+          {"\xC2\xBFD\xC3\xB3nde est\xC3\xA1 la escuela?",
+           "\xC2\xBFQu\xC3\xA9 es la escuela?",
+           "\xC2\xBFQui\xC3\xA9n tiene la escuela?",
+           "\xC2\xBFC\xC3\xBAndo est\xC3\xA1 la escuela?"}, {0},
+          "'D\xC3\xB3nde'=Where, 'est\xC3\xA1'=is, 'escuela'=school." },
+
+        // Type-answer
+        { "Type the Spanish translation for 'I have a house': ", "",
+          "Type the Spanish translation for I have a house.",
+          {}, {},
+          "The correct answer was 'Yo tengo una casa'.",
+          true,
+          {"Yo tengo una casa","yo tengo una casa","YO TENGO UNA CASA"} },
+
+        // Type-answer
+        { "Type the Spanish translation for 'Yo tengo una casa': ", "",
+          "Type the English translation for Yo tengo una casa.",
+          {}, {},
+          "The correct answer was 'I have a house'.",
+          true,
+          {"I have a house","i have a house","I HAVE A HOUSE"} },
+    }});
+
+    sp.profs.push_back(sp_p3);
+    C.push_back(sp);
+
+    return C;
+}
+
+// ─────────────────────────────────────────────
+//  SCREEN STATES
+// ─────────────────────────────────────────────
+enum AppScreen {
+    S_SPLASH, S_LANG, S_PROF,
+    S_INTRO,  S_QUIZ, S_TYPE,  S_CONGRATS
+};
+
+// ─────────────────────────────────────────────
+//  MAIN
+// ─────────────────────────────────────────────
+int main()
+{
+    const int SW = 980, SH = 660;
+    SetExitKey(KEY_NULL);
+    InitWindow(SW, SH, "Linguistico");
+    SetTargetFPS(60);
+    InitAudioDevice();
+    InitCustomFont();
+
+    Sound sClick   = MakeTone(660.f, 0.07f, 0.22f);
+    Sound sCorrect = MakeTone(880.f, 0.25f, 0.32f);
+    Sound sWrong   = MakeTone(200.f, 0.32f, 0.32f);
+    Sound sIntro   = MakeTone(528.f, 0.38f, 0.22f);
+
+    auto courses = BuildCourses();
+
+    // ── State ────────────────────────────────
+    AppScreen scr = S_SPLASH;
+    int ci=0, pi=0, li=0, qi=0, score=0, totalQ=0;
+    float timer=0.f, feed=0.f;
+    bool answered=false, correct=false, speaking=false;
+    float spkTimer=0.f, spkDur=0.f;
+    std::vector<bool> sel;
+    bool introReady = false;
+
+    // Type-answer state
+    char typeInput[256] = {};
+    int  typeLen = 0;
+    bool typeCorrect = false;
+    bool typeSubmitted = false;
+
+    // Star field
+    const int NS = 100;
+    float sx[100], sy[100], ss[100], sr[100];
+    for (int i = 0; i < NS; i++) {
+        sx[i] = (float)GetRandomValue(0, SW);
+        sy[i] = (float)GetRandomValue(0, SH);
+        ss[i] = GetRandomValue(1, 4) * 0.3f;
+        sr[i] = GetRandomValue(1, 3) * 0.5f;
+    }
+
+    // ── Helpers ──────────────────────────────
+    auto getLevel = [&]() -> const Level& {
+        return courses[ci].profs[pi].levels[li];
+    };
+    auto getQ = [&]() -> const Question& {
+        return getLevel().questions[qi];
+    };
+    auto resetQ = [&]() {
+        answered=false; correct=false; feed=0.f; speaking=false;
+        typeSubmitted=false; typeCorrect=false;
+        memset(typeInput, 0, sizeof(typeInput)); typeLen=0;
+        SpeakStop();
+        sel.assign(getQ().options.size(), false);
+    };
+    auto startSpeak = [&](const std::string& txt) {
+        Speak(txt);
+        speaking  = true;
+        spkDur    = (float)txt.size() * 0.075f + 0.6f;
+        spkTimer  = 0.f;
+    };
+    auto goQuiz = [&]() {
+        if (li >= (int)courses[ci].profs[pi].levels.size()) return;
+        if (qi >= (int)getLevel().questions.size()) qi = 0;
+        if (getQ().typeAnswer) scr = S_TYPE;
+        else                   scr = S_QUIZ;
+        introReady = false;
+        resetQ();
+        const std::string& st = getQ().speakText;
+        startSpeak(st.empty() ? getQ().prompt : st);
+    };
+    auto goIntro = [&]() {
+        scr = S_INTRO;
+        timer = 0.f;
+        introReady = false;
+        PlaySound(sIntro);
+        Speak("Level " + std::to_string(li+1) + ". " + getLevel().subtitle + ".");
+    };
+    auto startCourse = [&]() {
+        li=0; qi=0; score=0; totalQ=0;
+        for (auto& lv : courses[ci].profs[pi].levels)
+            totalQ += (int)lv.questions.size();
+        goIntro();
+    };
+    auto nextQ = [&]() {
+        qi++;
+        if (qi >= (int)getLevel().questions.size()) {
+            li++;
+            qi = 0;
+            if (li >= (int)courses[ci].profs[pi].levels.size()) {
+                scr = S_CONGRATS;
+                introReady = false;
+                PlaySound(sIntro);
+                Speak("Congratulations! You have completed this proficiency level.");
+            } else {
+                goIntro();
+            }
+        } else {
+            goQuiz();
+        }
+    };
+
+    // ─────────────────────────────────────────
+    //  MAIN LOOP
+    // ─────────────────────────────────────────
+    while (!WindowShouldClose())
+    {
+        float dt = GetFrameTime();
+        timer += dt;
+        if (feed > 0) feed -= dt * 1.5f;
+        if (speaking) { spkTimer += dt; if (spkTimer >= spkDur) speaking = false; }
+        for (int i = 0; i < NS; i++) { sy[i] += ss[i]; if (sy[i] > SH) sy[i] = 0; }
+
+        BeginDrawing();
+        ClearBackground(C_BG);
+
+        // Stars
+        for (int i = 0; i < NS; i++) {
+            float p = 0.5f + 0.5f * sinf(timer * ss[i] + (float)i);
+            DrawCircleV({sx[i], sy[i]}, sr[i],
+                {(unsigned char)(180*p),(unsigned char)(130*p),255,150});
+        }
+        DrawRectangle(0, 0, SW, 4, C_ACCENT);
+
+        // ══ SPLASH ═════════════════════════════
+        if (scr == S_SPLASH) {
+            float w = sinf(timer * 1.2f) * 5.f;
+            CText("LINGUISTICO", SH/2-110+(int)w, 58, C_GOLD, SW);
+            CText("A Language Learning Application", SH/2-42, 20, C_MUTED, SW);
+            CText("Designed by Irtiza, Faizan, Arshad and Gohar", SH/2-14, 16, C_MUTED, SW);
+            CText("~ Old English   ~   Spanish ~", SH/2+18, 22, C_ACCENT, SW);
+
+            // Prof mode legend
+            DrawRectangleRounded({(float)(SW/2-260), (float)(SH/2+52), 520.f, 36.f}, 0.3f, 8,
+                                 (Color){28,22,55,200});
+            DrawTextClean("Reading", SW/2-230, SH/2+62, 14, C_READ);
+            DrawTextClean("(Alphabets / Basics)", SW/2-170, SH/2+62, 14, C_MUTED);
+            DrawTextClean("Writing", SW/2-10, SH/2+62, 14, C_WRITE);
+            DrawTextClean("(Words)", SW/2+52, SH/2+62, 14, C_MUTED);
+            DrawTextClean("Translation", SW/2+120, SH/2+62, 14, C_TRANS);
+            DrawTextClean("(Hard)", SW/2+215, SH/2+62, 14, C_MUTED);
+
+            Rectangle b = RaylibBtn(SW/2, SH/2+110, 240, 54);
+            DrawBtn(b, "BEGIN", Hov(b), false, C_ACCENT);
+            if (Clk(b)) {
+                PlaySound(sClick);
+                Speak("Hello! Welcome to Linguistico. A language learning application.");
+                scr = S_LANG;
+            }
+        }
+
+        // ══ LANGUAGE SELECT ════════════════════
+        else if (scr == S_LANG) {
+            CText("Choose a Language", 75, 38, C_WHITE, SW);
+            CText("Which tongue shall you learn today?", 126, 19, C_MUTED, SW);
+            const char* langs[] = { "Old English", "Spanish" };
+            for (int i = 0; i < 2; i++) {
+                Rectangle r = RaylibBtn(SW/2, 240 + i*100, 320, 64);
+                DrawBtn(r, langs[i], Hov(r), false, C_ACCENT);
+                if (Clk(r)) {
+                    PlaySound(sClick); ci = i; scr = S_PROF;
+                    Speak(std::string(langs[i]) + " selected.");
+                }
+            }
+            Rectangle bk = {30.f, (float)(SH-62), 110.f, 40.f};
+            DrawTextClean("< Back", 42, SH-50, 16, Hov(bk) ? C_WHITE : C_MUTED);
+            if (Clk(bk)) { PlaySound(sClick); SpeakStop(); scr = S_SPLASH; }
+        }
+
+        // ══ PROFICIENCY SELECT ═════════════════
+        else if (scr == S_PROF) {
+            CText(courses[ci].name.c_str(), 58, 36, C_GOLD, SW);
+            CText("Select your Proficiency Level", 106, 20, C_MUTED, SW);
+
+            // Subtitle banner
+            const char* profSub[] = {
+                "Reading   -  Learn the fundamentals",
+                "Writing   -  Build your vocabulary",
+                "Translation   -  Master full sentences"
+            };
+
+            for (int i = 0; i < (int)courses[ci].profs.size(); i++) {
+                Rectangle r = RaylibBtn(SW/2, 180 + i*120, 500, 84);
+                bool hov = Hov(r);
+                Color pc = ProfColor(i);
+                Color bg = hov ? (Color){pc.r/3, pc.g/3, pc.b/3, 255} : C_PANEL;
+                DrawRectangleRounded(r, 0.25f, 8, bg);
+                DrawRectangleRoundedLines(r, 0.25f, 8, hov ? pc : C_ACCENT);
+
+                // Badge on left
+                DrawRectangleRounded({r.x+12, r.y+18, 60.f, 48.f}, 0.3f, 8,
+                                     (Color){pc.r/2, pc.g/2, pc.b/2, 200});
+                // Roman numeral / icon
+                const char* nums[] = {"I","II","III"};
+                int nw = (int)MeasureTextEx(g_font, nums[i], 22, 1.0f).x;
+                DrawTextClean(nums[i], (int)(r.x+42-nw/2), (int)(r.y+30), 22, pc);
+
+                // Name (big)
+                DrawTextClean(courses[ci].profs[i].name.c_str(),
+                    (int)(r.x + 88), (int)(r.y + 20), 24, hov ? pc : C_WHITE);
+                // Sub label
+                DrawTextClean(courses[ci].profs[i].badge.c_str(),
+                    (int)(r.x + 90), (int)(r.y + 50), 15, C_MUTED);
+
+                if (Clk(r)) {
+                    PlaySound(sClick); pi = i;
+                    Speak(courses[ci].profs[i].name + " selected.");
+                    startCourse();
+                }
+            }
+            Rectangle bk = {30.f, (float)(SH-62), 110.f, 40.f};
+            DrawTextClean("< Back", 42, SH-50, 16, Hov(bk) ? C_WHITE : C_MUTED);
+            if (Clk(bk)) { PlaySound(sClick); SpeakStop(); scr = S_LANG; }
+        }
+
+        // ══ LEVEL INTRO ════════════════════════
+        else if (scr == S_INTRO) {
+            const auto& lv = getLevel();
+            float fade = fminf(timer * 2.f, 1.f);
+            Color fc = {C_WHITE.r, C_WHITE.g, C_WHITE.b, (unsigned char)(255*fade)};
+            Color pc = ProfColor(pi);
+            // Prof badge top
+            char pbadge[64];
+            snprintf(pbadge, sizeof(pbadge), "%s  ·  %s",
+                     courses[ci].profs[pi].name.c_str(),
+                     courses[ci].profs[pi].badge.c_str());
+            CText(pbadge, SH/2-110, 18, pc, SW);
+            CText(lv.title.c_str(),    SH/2-80, 28, C_MUTED, SW);
+            CText(lv.subtitle.c_str(), SH/2-38, 52, fc,      SW);
+            DrawLine(SW/2-200, SH/2+28, SW/2+200, SH/2+28, pc);
+            CText("Click or press SPACE to begin", SH/2+58, 18, C_MUTED, SW);
+            if (timer > 1.0f) introReady = true;
+            if (introReady && (IsKeyPressed(KEY_SPACE) || IsMouseButtonPressed(MOUSE_LEFT_BUTTON)))
+                goQuiz();
+        }
+
+        // ══ QUIZ (Multiple-Choice) ══════════════
+        else if (scr == S_QUIZ) {
+            const auto& lv = getLevel();
+            const auto& q  = getQ();
+            Color pc = ProfColor(pi);
+
+            // Header
+            char hdr[140];
+            snprintf(hdr, sizeof(hdr), "%s  [%s]  -  %s  -  Q%d/%d",
+                courses[ci].name.c_str(),
+                courses[ci].profs[pi].name.c_str(),
+                lv.subtitle.c_str(),
+                qi+1, (int)lv.questions.size());
+            DrawTextClean(hdr, 28, 14, 12, C_MUTED);
+            char sc2[32];
+            snprintf(sc2, sizeof(sc2), "Score: %d/%d", score, totalQ);
+            int tw = (int)MeasureTextEx(g_font, sc2, 14, 1.0f).x;
+            DrawTextClean(sc2, SW - tw - 28, 14, 14, C_GOLD);
+
+            // Proficiency accent line
+            DrawRectangle(0, 0, SW, 4, pc);
+
+            // Question panel
+            DrawRectangleRounded({28.f, 44.f, (float)(SW-56), 126.f}, 0.15f, 8, C_PANEL);
+            DrawTextClean(q.prompt.c_str(), 48, 58, 19, C_WHITE);
+            if (!q.subtext.empty())
+                CText(q.subtext.c_str(), 96, 26, C_GOLD, SW);
+
+            // Speaker button
+            if (DrawSpeaker(SW-88, 58, speaking)) {
+                if (speaking) { SpeakStop(); speaking = false; }
+                else startSpeak(q.speakText.empty() ? q.prompt : q.speakText);
+            }
+
+            // Options
+            int oy = 200;
+            const int OW = 460, OH = 50;
+            for (int i = 0; i < (int)q.options.size(); i++) {
+                Rectangle r = RaylibBtn(SW/2, oy, OW, OH);
+                bool hov = Hov(r) && !answered;
+                Color sc = C_ACCENT;
+                if (answered && sel[i]) {
+                    bool ok = false;
+                    for (int c : q.correct) if (c == i) ok = true;
+                    sc = ok ? C_CORRECT : C_WRONG;
+                }
+                if (answered && !sel[i])
+                    for (int c : q.correct)
+                        if (c == i) DrawRectangleRoundedLines(r, 0.3f, 8, C_CORRECT);
+                std::string lbl = std::to_string(i+1) + ".  " + q.options[i];
+                DrawBtn(r, lbl.c_str(), hov, sel[i], sc);
+                if (!answered && Clk(r)) { PlaySound(sClick); sel[i] = !sel[i]; }
+                oy += OH + 9;
+            }
+
+            // Submit button
+            if (!answered) {
+                Rectangle sb = RaylibBtn(SW/2, oy+12, 210, 48);
+                DrawBtn(sb, "Submit", Hov(sb), false, pc);
+                if (Clk(sb)) {
+                    SpeakStop(); speaking = false;
+                    answered = true; correct = true;
+                    for (int c : q.correct) if (!sel[c]) { correct = false; break; }
+                    if (correct)
+                        for (int i = 0; i < (int)q.options.size(); i++)
+                            if (sel[i]) {
+                                bool v = false;
+                                for (int c : q.correct) if (c==i) v=true;
+                                if (!v) { correct = false; break; }
+                            }
+                    if (correct) { score++; PlaySound(sCorrect); Speak("Correct answer!"); }
+                    else { PlaySound(sWrong); Speak("Wrong answer. " + q.explanation.substr(0, q.explanation.find('\n'))); }
+                    feed = 1.f;
+                }
+            }
+            // Feedback + Next button
+            else {
+                Color fc2 = correct ? C_CORRECT : C_WRONG;
+                CText(correct ? "CORRECT!" : "INCORRECT", oy+4, 22, fc2, SW);
+                DrawRectangleRounded({56.f,(float)(oy+32),(float)(SW-112),68.f}, 0.15f, 8, C_PANEL);
+                DrawTextClean(q.explanation.c_str(), 74, oy+44, 14, C_MUTED);
+                bool last = (qi+1 >= (int)lv.questions.size());
+                Rectangle nb = RaylibBtn(SW/2, oy+116, 210, 48);
+                DrawBtn(nb, last ? "Next Level >" : "Next Question", Hov(nb), false, pc);
+                if (Clk(nb)) { PlaySound(sClick); nextQ(); }
+            }
+
+            // Flash on answer
+            if (feed > 0.f) {
+                Color fl = correct
+                    ? (Color){80, 220, 130, (unsigned char)(feed * 50)}
+                    : (Color){230, 80,  90,  (unsigned char)(feed * 50)};
+                DrawRectangle(0, 0, SW, SH, fl);
+            }
+        }
+
+        // ══ TYPE-ANSWER QUESTION ════════════════
+        else if (scr == S_TYPE) {
+            const auto& lv = getLevel();
+            const auto& q  = getQ();
+            Color pc = ProfColor(pi);
+
+            // Header
+            char hdr[140];
+            snprintf(hdr, sizeof(hdr), "%s  [%s]  -  %s  -  Q%d/%d",
+                courses[ci].name.c_str(),
+                courses[ci].profs[pi].name.c_str(),
+                lv.subtitle.c_str(),
+                qi+1, (int)lv.questions.size());
+            DrawTextClean(hdr, 28, 14, 12, C_MUTED);
+            char sc2[32];
+            snprintf(sc2, sizeof(sc2), "Score: %d/%d", score, totalQ);
+            int tw2 = (int)MeasureTextEx(g_font, sc2, 14, 1.0f).x;
+            DrawTextClean(sc2, SW - tw2 - 28, 14, 14, C_GOLD);
+            DrawRectangle(0, 0, SW, 4, pc);
+
+            // Question panel
+            DrawRectangleRounded({28.f, 44.f, (float)(SW-56), 100.f}, 0.15f, 8, C_PANEL);
+            DrawTextClean(q.prompt.c_str(), 48, 62, 19, C_WHITE);
+            if (!q.subtext.empty())
+                CText(q.subtext.c_str(), 112, 22, C_GOLD, SW);
+
+            // Speaker
+            if (DrawSpeaker(SW-88, 58, speaking)) {
+                if (speaking) { SpeakStop(); speaking = false; }
+                else startSpeak(q.speakText.empty() ? q.prompt : q.speakText);
+            }
+
+            // Text input box
+            int boxy = 180;
+            Rectangle inputBox = {80.f, (float)boxy, (float)(SW-160), 52.f};
+            Color boxCol = typeSubmitted
+                ? (typeCorrect ? C_CORRECT : C_WRONG)
+                : pc;
+            DrawRectangleRounded(inputBox, 0.2f, 8, C_PANEL);
+            DrawRectangleRoundedLines(inputBox, 0.2f, 8, boxCol);
+            DrawTextClean(typeInput, 96, boxy+16, 20, C_WHITE);
+
+            // Blinking cursor when not submitted
+            if (!typeSubmitted) {
+                int cursorX = 96;
+                if (g_font.texture.id > 0 && g_font.texture.id != GetFontDefault().texture.id)
+                    cursorX += (int)MeasureTextEx(g_font, typeInput, 20, 1.0f).x;
+                else
+                    cursorX += (int)MeasureTextEx(g_font, typeInput, 20, 1.0f).x;
+                if ((int)(timer * 2) % 2 == 0)
+                    DrawRectangle(cursorX+2, boxy+12, 2, 26, pc);
+            }
+
+            DrawTextClean("Type your answer above and press ENTER to submit", 80, boxy+64, 14, C_MUTED);
+
+            // Handle keyboard input (only when not submitted)
+            if (!typeSubmitted) {
+                // Backspace
+                if (IsKeyPressed(KEY_BACKSPACE) && typeLen > 0) {
+                    typeInput[--typeLen] = '\0';
+                }
+                // Regular chars
+                int key = GetCharPressed();
+                while (key > 0) {
+                    if ((key >= 32) && (typeLen < 250)) {
+                        typeInput[typeLen++] = (char)key;
+                        typeInput[typeLen]   = '\0';
+                    }
+                    key = GetCharPressed();
+                }
+                // Submit on ENTER
+                if (IsKeyPressed(KEY_ENTER) && typeLen > 0) {
+                    typeSubmitted = true;
+                    typeCorrect   = false;
+                    std::string ans(typeInput);
+                    for (auto& a : q.acceptedAnswers)
+                        if (ans == a) { typeCorrect = true; break; }
+                    if (typeCorrect) {
+                        score++;
+                        PlaySound(sCorrect);
+                        Speak("Correct answer!");
+                    } else {
+                        PlaySound(sWrong);
+                        Speak("Wrong answer.");
+                    }
+                    feed = 1.f;
+                }
+            }
+
+            // Feedback
+            if (typeSubmitted) {
+                Color fc2 = typeCorrect ? C_CORRECT : C_WRONG;
+                CText(typeCorrect ? "CORRECT!" : "INCORRECT", boxy+100, 24, fc2, SW);
+                DrawRectangleRounded({56.f,(float)(boxy+134),(float)(SW-112),60.f}, 0.15f, 8, C_PANEL);
+                DrawTextClean(q.explanation.c_str(), 74, boxy+146, 14, C_MUTED);
+
+                bool last = (qi+1 >= (int)lv.questions.size());
+                Rectangle nb = RaylibBtn(SW/2, boxy+210, 240, 48);
+                DrawBtn(nb, last ? "Next Level >" : "Next Question", Hov(nb), false, pc);
+                if (Clk(nb)) { PlaySound(sClick); nextQ(); }
+            }
+
+            // Flash
+            if (feed > 0.f) {
+                Color fl = typeCorrect
+                    ? (Color){80, 220, 130, (unsigned char)(feed * 50)}
+                    : (Color){230, 80,  90,  (unsigned char)(feed * 50)};
+                DrawRectangle(0, 0, SW, SH, fl);
+            }
+        }
+
+        // ══ CONGRATS ═══════════════════════════
+        else if (scr == S_CONGRATS) {
+            Color pc = ProfColor(pi);
+            DrawRectangle(0, 0, SW, 4, pc);
+
+            CText("Proficiency Level Complete!", SH/2-140, 42, C_GOLD, SW);
+
+            // Proficiency name badge
+            char pbadge[80];
+            snprintf(pbadge, sizeof(pbadge), "%s  —  %s",
+                     courses[ci].profs[pi].name.c_str(),
+                     courses[ci].profs[pi].badge.c_str());
+            CText(pbadge, SH/2-90, 20, pc, SW);
+
+            char sc2[64];
+            snprintf(sc2, sizeof(sc2), "Final Score: %d / %d", score, totalQ);
+            CText(sc2, SH/2-60, 28, C_WHITE, SW);
+            float pct = (totalQ > 0) ? (float)score / totalQ : 0.f;
+            CText(pct>=0.8f ? "Outstanding!" : pct>=0.5f ? "Well done!" : "Keep practising!",
+                  SH/2-24, 22, C_ACCENT, SW);
+
+            // Score bar
+            int bw = 420;
+            DrawRectangleRounded({(float)(SW/2-bw/2),(float)(SH/2+8),(float)bw,14.f}, 0.5f, 8, C_PANEL);
+            DrawRectangleRounded({(float)(SW/2-bw/2),(float)(SH/2+8),bw*pct,14.f}, 0.5f, 8, pc);
+
+            // Final passage display
+            DrawRectangleRounded({40.f,(float)(SH/2+36),(float)(SW-80),128.f}, 0.15f, 8, C_PANEL);
+            if (ci == 0) {
+                // Old English – Lord's Prayer
+                DrawTextClean("THE LORD'S PRAYER (Old English):", 58, SH/2+48, 16, C_GOLD);
+                DrawTextClean("F\xC3\xA6der ure, \xC3\xBEu \xC3\xBEe eart on heofonum,", 58, SH/2+68, 14, C_MUTED);
+                DrawTextClean("Si \xC3\xBEin nama gehalgod. Tobecume \xC3\xBEin rice.", 58, SH/2+84, 14, C_MUTED);
+                DrawTextClean("Our Father, who art in heaven, Hallowed be thy Name.", 58, SH/2+104, 14, C_WHITE);
+                DrawTextClean("Thy Kingdom come. Thy will be done in Earth as it is in Heaven.", 58, SH/2+120, 13, C_WHITE);
+            } else {
+                // Spanish – Final Story
+                DrawTextClean("FINAL SPANISH STORY:", 58, SH/2+48, 16, C_GOLD);
+                DrawTextClean("Hola amigo. Me llamo Carlos y yo voy a la escuela.", 58, SH/2+68, 14, C_MUTED);
+                DrawTextClean("Mi amigo tiene un perro negro y una casa grande.", 58, SH/2+84, 14, C_MUTED);
+                DrawTextClean("Hello friend. My name is Carlos and I go to school.", 58, SH/2+104, 14, C_WHITE);
+                DrawTextClean("My friend has a black dog and a big house.", 58, SH/2+120, 14, C_WHITE);
+            }
+
+            Rectangle ag = RaylibBtn(SW/2-140, SH/2+184, 220, 50);
+            Rectangle mn = RaylibBtn(SW/2+140, SH/2+184, 220, 50);
+            DrawBtn(ag, "Play Again", Hov(ag), false, pc);
+            DrawBtn(mn, "Main Menu",  Hov(mn), false, C_MUTED);
+            if (Clk(ag)) { PlaySound(sClick); startCourse(); }
+            if (Clk(mn)) { PlaySound(sClick); SpeakStop(); scr = S_LANG; timer = 0.f; }
+        }
+
+        EndDrawing();
+    }
+
+    // Cleanup
+    SpeakStop();
+    if (g_font.texture.id > 0 && g_font.texture.id != GetFontDefault().texture.id)
+        UnloadFont(g_font);
+    UnloadSound(sClick);  UnloadSound(sCorrect);
+    UnloadSound(sWrong);  UnloadSound(sIntro);
+    CloseAudioDevice();
+    CloseWindow();
+    return 0;
+}
