@@ -142,8 +142,8 @@ This project was created as a BSCS educational project to demonstrate:
 # Developers
 
 Developed by:
+- Faizan 
 - Irtiza
-- Faizan
 - Arshad
 - Gohar
 
