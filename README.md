@@ -5,7 +5,7 @@ Linguistico is a graphical language learning application developed in C++ using 
 This project focuses on interactive learning for:
 - Old English
 - Spanish
-
+  
 The application combines:
 - listening
 - reading
