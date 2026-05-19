@@ -1,4 +1,5 @@
 # Linguistico - Raylib Language Learning Application
+
 Linguistico is a graphical language learning application developed in C++ using Raylib.
 
 This project focuses on interactive learning for:
